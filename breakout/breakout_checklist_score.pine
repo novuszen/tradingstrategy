@@ -1,0 +1,145 @@
+//@version=5
+indicator("7-Step Breakout Checklist", overlay=true, max_labels_count=500)
+
+groupSetup = "Setup"
+groupTrigger = "Trigger"
+groupConfirm = "Confirmation"
+groupDisplay = "Display"
+
+trendTf = input.timeframe("240", "Higher timeframe", group=groupSetup)
+trendEmaLength = input.int(50, "HTF EMA length", minval=10, group=groupSetup)
+levelLookback = input.int(20, "Breakout level lookback", minval=5, group=groupSetup)
+compressionBars = input.int(8, "Compression candles", minval=5, maxval=15, group=groupSetup)
+compressionRangePct = input.float(2.0, "Max compression range %", minval=0.2, step=0.1, group=groupSetup)
+smallBodyRatio = input.float(0.55, "Max avg body/range ratio", minval=0.1, maxval=1.0, step=0.05, group=groupSetup)
+
+bodyVsAverage = input.float(1.2, "Breakout body vs average", minval=0.8, step=0.1, group=groupTrigger)
+minBodyToRange = input.float(0.6, "Min breakout body/range", minval=0.2, maxval=1.0, step=0.05, group=groupTrigger)
+maxWickRatio = input.float(0.25, "Max wick/range", minval=0.05, maxval=0.8, step=0.05, group=groupTrigger)
+volumeLength = input.int(20, "Volume average length", minval=5, group=groupTrigger)
+volumeSpikeMult = input.float(1.5, "Volume spike multiplier", minval=1.0, step=0.1, group=groupTrigger)
+
+retestWindow = input.int(5, "Retest window", minval=2, maxval=10, group=groupConfirm)
+followBars = input.int(3, "Follow-through bars", minval=2, maxval=3, group=groupConfirm)
+followNeeded = input.int(2, "Bars needed for follow-through", minval=1, maxval=3, group=groupConfirm)
+
+showLevels = input.bool(true, "Show breakout levels", group=groupDisplay)
+showLiveTable = input.bool(true, "Show score table", group=groupDisplay)
+
+htfClose = request.security(syminfo.tickerid, trendTf, close, lookahead=barmerge.lookahead_off)
+htfEma = request.security(syminfo.tickerid, trendTf, ta.ema(close, trendEmaLength), lookahead=barmerge.lookahead_off)
+
+resistance = ta.highest(high, levelLookback)[1]
+support = ta.lowest(low, levelLookback)[1]
+
+avgBody = ta.sma(math.abs(close - open), compressionBars)
+avgRange = ta.sma(high - low, compressionBars)
+compressionRange = ta.highest(high, compressionBars)[1] - ta.lowest(low, compressionBars)[1]
+compressionOk = close != 0 and compressionRange / close * 100 <= compressionRangePct and avgRange > 0 and avgBody / avgRange <= smallBodyRatio
+
+rangeNow = math.max(high - low, syminfo.mintick)
+bodyNow = math.abs(close - open)
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+avgTriggerBody = ta.sma(math.abs(close - open), volumeLength)
+avgVolume = ta.sma(volume, volumeLength)
+
+trendUp = htfClose > htfEma and htfEma >= htfEma[1]
+trendDown = htfClose < htfEma and htfEma <= htfEma[1]
+
+breakoutLong = close > resistance and close[1] <= resistance
+breakoutShort = close < support and close[1] >= support
+
+closeTestLong = breakoutLong and close > resistance
+closeTestShort = breakoutShort and close < support
+
+strengthLong = breakoutLong and bodyNow >= avgTriggerBody * bodyVsAverage and bodyNow / rangeNow >= minBodyToRange and upperWick / rangeNow <= maxWickRatio
+strengthShort = breakoutShort and bodyNow >= avgTriggerBody * bodyVsAverage and bodyNow / rangeNow >= minBodyToRange and lowerWick / rangeNow <= maxWickRatio
+
+volumeTest = volume > avgVolume * volumeSpikeMult
+
+var int activeDir = 0
+var int breakoutBar = na
+var float breakoutLevel = na
+var int setupTriggerScore = na
+var int followCount = 0
+var bool retestPassed = false
+var bool followPassed = false
+var string activeSide = "None"
+
+var int lastScore = na
+var string lastVerdict = "No completed setup yet"
+var string lastSide = "None"
+
+newSignal = breakoutLong or breakoutShort
+
+if activeDir == 0 and newSignal
+    isLong = breakoutLong
+    activeDir := isLong ? 1 : -1
+    breakoutBar := bar_index
+    breakoutLevel := isLong ? resistance : support
+    trendPoint = isLong ? trendUp : trendDown
+    closePoint = isLong ? closeTestLong : closeTestShort
+    strengthPoint = isLong ? strengthLong : strengthShort
+    setupTriggerScore := (trendPoint ? 1 : 0) + (compressionOk ? 1 : 0) + (closePoint ? 1 : 0) + (strengthPoint ? 1 : 0) + (volumeTest ? 1 : 0)
+    retestPassed := false
+    followPassed := false
+    followCount := 0
+    activeSide := isLong ? "Long" : "Short"
+
+if activeDir != 0 and bar_index > breakoutBar
+    if activeDir == 1
+        retestPassed := retestPassed or ((bar_index - breakoutBar) <= retestWindow and low <= breakoutLevel and close >= breakoutLevel)
+        followCount += ((bar_index - breakoutBar) <= followBars and close > breakoutLevel and close >= open) ? 1 : 0
+    else
+        retestPassed := retestPassed or ((bar_index - breakoutBar) <= retestWindow and high >= breakoutLevel and close <= breakoutLevel)
+        followCount += ((bar_index - breakoutBar) <= followBars and close < breakoutLevel and close <= open) ? 1 : 0
+    followPassed := followPassed or followCount >= followNeeded
+
+confirmWindowDone = activeDir != 0 and not na(breakoutBar) and (bar_index - breakoutBar) >= math.max(retestWindow, followBars)
+
+if confirmWindowDone
+    finalScore = setupTriggerScore + (retestPassed ? 1 : 0) + (followPassed ? 1 : 0)
+    verdict = finalScore >= 6 ? "Trade" : finalScore >= 4 ? "Wait / be cautious" : "Trap, walk away"
+    labelColor = finalScore >= 6 ? color.new(color.lime, 0) : finalScore >= 4 ? color.new(color.orange, 0) : color.new(color.red, 0)
+    labelStyle = activeDir == 1 ? label.style_label_up : label.style_label_down
+    y = activeDir == 1 ? low : high
+    labelText = activeSide + "\nScore: " + str.tostring(finalScore) + "/7\n" + verdict + "\nBest entry: retest"
+    label.new(bar_index, y, labelText, style=labelStyle, color=labelColor, textcolor=color.black)
+    lastScore := finalScore
+    lastVerdict := verdict
+    lastSide := activeSide
+    activeDir := 0
+    breakoutBar := na
+    breakoutLevel := na
+    setupTriggerScore := na
+    followCount := 0
+    retestPassed := false
+    followPassed := false
+    activeSide := "None"
+
+plot(showLevels ? resistance : na, "Resistance", color=color.new(color.green, 65), style=plot.style_linebr)
+plot(showLevels ? support : na, "Support", color=color.new(color.red, 65), style=plot.style_linebr)
+
+plotshape(breakoutLong, title="Long breakout", style=shape.triangleup, color=color.new(color.lime, 0), location=location.belowbar, size=size.tiny, text="BO")
+plotshape(breakoutShort, title="Short breakout", style=shape.triangledown, color=color.new(color.red, 0), location=location.abovebar, size=size.tiny, text="BO")
+
+bgcolor(activeDir == 1 ? color.new(color.lime, 92) : activeDir == -1 ? color.new(color.red, 92) : na)
+
+var table scoreTable = table.new(position.top_right, 2, 6, border_width=1)
+
+if barstate.islast and showLiveTable
+    liveScore = (activeDir == 0 or na(setupTriggerScore)) ? na : setupTriggerScore + (retestPassed ? 1 : 0) + (followPassed ? 1 : 0)
+    liveVerdict = na(liveScore) ? "Watching for breakout" : liveScore >= 6 ? "Trade" : liveScore >= 4 ? "Cautious" : "Trap"
+    table.cell(scoreTable, 0, 0, "7-Step Breakout", bgcolor=color.new(color.blue, 75), text_color=color.white)
+    table.cell(scoreTable, 1, 0, syminfo.ticker, bgcolor=color.new(color.blue, 75), text_color=color.white)
+    table.cell(scoreTable, 0, 1, "Active setup")
+    table.cell(scoreTable, 1, 1, activeSide)
+    table.cell(scoreTable, 0, 2, "Live score")
+    table.cell(scoreTable, 1, 2, na(liveScore) ? "-" : str.tostring(liveScore) + "/7")
+    table.cell(scoreTable, 0, 3, "Live verdict")
+    table.cell(scoreTable, 1, 3, liveVerdict)
+    table.cell(scoreTable, 0, 4, "Last setup")
+    table.cell(scoreTable, 1, 4, lastSide + (na(lastScore) ? "" : " " + str.tostring(lastScore) + "/7"))
+    table.cell(scoreTable, 0, 5, "Last verdict")
+    table.cell(scoreTable, 1, 5, lastVerdict)
